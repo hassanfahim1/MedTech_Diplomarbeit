@@ -91,10 +91,14 @@ Eine präzise, temperaturoptimierte Spritzenpumpe für medizinische und Laboranw
 
 ```
 MedTech_Diplomarbeit/
-├── spritzenpumpe_5ml.ino      # Code für 5ml Spritzen
-├── spritzenpumpe_10ml.ino     # Code für 10ml Spritzen
-├── README.md                   # Diese Datei
-└── [weitere Dateien]
+├── CAD/                        # CAD-Dateien und Zeichnungen
+├── Schema/                     # Schaltpläne und Schemas
+├── images/                     # Bilder und Dokumentation
+├── scr/                        # Source Code
+│   ├── spritzenpumpe_5ml.ino                      # Code für 5ml Spritzen
+│   ├── spritzenpumpe_10ml.ino                     # Code für 10ml Spritzen
+│   └── Spritzenpumpe_10ml_5ml_RotaryEncoder.ino   # Universalversion mit Encoder
+└── README.md                   # Diese Datei
 ```
 
 ## 🛠️ Entwicklung
