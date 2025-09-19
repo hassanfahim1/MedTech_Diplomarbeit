@@ -1,5 +1,4 @@
-# MedTech_Diplomarbeit
-# Open Source Spritzenpumpe
+# MedTech_Diplomarbeit | Open Source Spritzenpumpe
 
 Eine präzise, temperaturoptimierte Spritzenpumpe für medizinische und Laboranwendungen.
 
