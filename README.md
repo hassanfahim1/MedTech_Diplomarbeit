@@ -29,7 +29,7 @@ Eine präzise, temperaturoptimierte Spritzenpumpe für medizinische und Laboranw
 - **LCD:** I2C (SDA/SCL)
 - **Motor Shield:** Standard Pins (3, 8, 9, 11, 12, 13)
 
-## 💾 Software
+## 💾 Code
 
 ### Verfügbare Versionen:
 - **`spritzenpumpe_5ml.ino`** - Optimiert für 5ml Spritzen
