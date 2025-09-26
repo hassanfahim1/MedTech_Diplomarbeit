@@ -14,7 +14,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <Stepper.h>
 
-// ----------------- Motor Shield Rev3 Pins -----------------
+// ----------------- Hier sind alle Motor Shield Rev3 Pins (Anschlüsse) -----------------
 #define pwmA   3
 #define pwmB  11
 #define brakeA 9
@@ -22,19 +22,19 @@
 #define dirA  12
 #define dirB  13
 
-// ----------------- Button Pins -----------------
-#define BTN_START_STOP 2    // Stop/Start
-#define BTN_FILL       7    // Füllen
-#define BTN_EMPTY      5    // Entleeren
+// ----------------- Die drei Taster wo ich angeschlossen habe -----------------
+#define BTN_START_STOP 2    // Stop/Start Button
+#define BTN_FILL       7    // Füllen Button
+#define BTN_EMPTY      5    // Entleeren Button
 
-// ----------------- Motor Setup -----------------
+// ----------------- Motor Einstellung -----------------
 const int stepsPerRevolution = 200;
 Stepper myStepper = Stepper(stepsPerRevolution, dirA, dirB);
 
-// ----------------- LCD -----------------
+// ----------------- LCD Display -----------------
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ----------------- Umlaute -----------------
+// ----------------- Deutsche Umlaute selbst gemacht weil LCD sie nicht kann -----------------
 byte umlaut_ue[8] = {0x0A,0x00,0x11,0x11,0x11,0x13,0x0D,0x00}; // ü
 byte umlaut_ae[8] = {0x0A,0x00,0x0E,0x01,0x0F,0x11,0x0F,0x00}; // ä
 byte umlaut_oe[8] = {0x0A,0x00,0x0E,0x11,0x11,0x11,0x0E,0x00}; // ö
@@ -49,13 +49,13 @@ byte umlaut_OE[8] = {0x0A,0x00,0x0E,0x11,0x11,0x11,0x0E,0x00}; // Ö
 #define CHAR_AE_GROSS 4
 #define CHAR_OE_GROSS 5
 
-// ----------------- 5ml Spritze Konfiguration -----------------
-const int stepSize = 4250;           // Schritte pro Bewegung
-const float stepsPerML = 850.0;      // Schritte pro ml
-const int minSteps = -4250;          // Minimale Position (voll)
-const float targetVolume = 5.0;      // Zielvolumen in ml
+// ----------------- Einstellungen für 5ml Spritze (getestet und funktioniert gut) -----------------
+const int stepSize = 4250;           // soviele Schritte braucht für ganze Spritze
+const float stepsPerML = 850.0;      // Schritte für einen ml
+const int minSteps = -4250;          // minimum Position wenn Spritze voll ist
+const float targetVolume = 5.0;      // maximum Volumen
 
-// ----------------- Zustände -----------------
+// ----------------- verschiedene Zustände vom System -----------------
 bool motorRunning = false;
 bool motorStopped = false;
 bool lastStopStartState = HIGH;
@@ -66,40 +66,44 @@ bool currentStopStartState = HIGH;
 bool currentFillState = HIGH;
 bool currentEmptyState = HIGH;
 
-int motorSpeed = 120; // rpm
+int motorSpeed = 120; // Geschwindigkeit in rpm, nicht zu schnell sonst verliert Schritte
 
-// ----------------- Debounce -----------------
+// ----------------- Button-Entprellung für stabile Funktion -----------------
+// Mechanische Buttons "prellen" beim Drücken mehrmals schnell
+// Ohne diese Wartezeit würde ein Druck als mehrere Drücke erkannt werden
+// Das führt zu ungewollten mehrfach-Ausführungen
 unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 50;
 
 int totalSteps = 0;
 
-// ----------------- Zeit-Tracking -----------------
+// ----------------- Zeit messen für Operationen -----------------
 unsigned long operationStartTime = 0;
 unsigned long operationDuration  = 0;
 bool operationInProgress = false;
 
-// ----------------- Idle-Handling / Thermik -----------------
+// ----------------- Motor wird heiß Fix -----------------
 static unsigned long lastMoveMs = 0;
-const unsigned long IDLE_RELEASE_MS = 2000; // nach 2s Phasen freigeben
+const unsigned long IDLE_RELEASE_MS = 2000; // nach 2 Sekunden Motor freigeben
 
-// Optional: reduzierter Haltestrom statt komplett freigeben
-// 0..255 Duty; 0 = freigeben (empfohlen), z.B. 60..80 = ~25-30% Duty
-#define HALTESTROM_DUTY 0   // auf >0 setzen, wenn leichtes Haltemoment nötig
+// Optional: bisschen Strom lassen statt ganz freigeben
+// 0..255 Wert; 0 = komplett freigeben, ca 60-80 = bisschen halten
+#define HALTESTROM_DUTY 0   // auf >0 setzen wenn Motor bisschen halten soll
 
-// ----------------- Hilfsfunktionen -----------------
+// ----------------- Hilfs Funktionen -----------------
 void noteActivity() { lastMoveMs = millis(); }
 
-// Motor freigeben: keine Dauerbestromung -> deutlich weniger Wärme
+// Motor freigeben damit er nicht überhitzt
+// Wenn Motor steht soll kein Strom fließen, sonst wird er zu heiß
 void motorRelease() {
   if (HALTESTROM_DUTY == 0) {
-    // voll freigeben
+    // komplett freigeben
     digitalWrite(pwmA, LOW);
     digitalWrite(pwmB, LOW);
-    digitalWrite(brakeA, HIGH); // dynamische Bremse
+    digitalWrite(brakeA, HIGH); // Bremse an
     digitalWrite(brakeB, HIGH);
   } else {
-    // reduzierter "Haltestrom" per PWM (Notlösung)
+    // bisschen Strom lassen falls nötig
     digitalWrite(brakeA, LOW);
     digitalWrite(brakeB, LOW);
     analogWrite(pwmA, HALTESTROM_DUTY);
@@ -107,11 +111,11 @@ void motorRelease() {
   }
 }
 
-// Motor aktivieren vor Bewegung
+// Motor anschalten bevor er sich bewegen soll
 void motorEnable() {
   digitalWrite(brakeA, LOW);
   digitalWrite(brakeB, LOW);
-  // Volle Versorgung auf die H-Brücken
+  // volle Power geben
   if (HALTESTROM_DUTY == 0) {
     digitalWrite(pwmA, HIGH);
     digitalWrite(pwmB, HIGH);
@@ -121,14 +125,14 @@ void motorEnable() {
   }
 }
 
-// ----------------- Setup -----------------
+// ----------------- Setup läuft einmal beim Start -----------------
 void setup() {
   pinMode(pwmA, OUTPUT);
   pinMode(pwmB, OUTPUT);
   pinMode(brakeA, OUTPUT);
   pinMode(brakeB, OUTPUT);
 
-  // Startzustand: Motor freigeben
+  // am Anfang Motor freigeben
   motorRelease();
 
   pinMode(BTN_START_STOP, INPUT_PULLUP);
@@ -151,18 +155,18 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("5ml Spritzenpumpe");
   lcd.setCursor(0, 1);
-  lcd.print("Ready...");
+  lcd.print("V1.2 HFMTS");
   delay(2000);
 
   updatePumpDisplay();
   noteActivity();
 }
 
-// ----------------- Loop -----------------
+// ----------------- Main Loop läuft immer und immer -----------------
 void loop() {
   handlePumpOperation();
 
-  // Idle-Handling: wenn nicht in Bewegung und nicht in Operation -> freigeben
+  // wenn nichts passiert nach 2 Sekunden Motor freigeben
   if (!motorRunning && !operationInProgress) {
     if (millis() - lastMoveMs > IDLE_RELEASE_MS) {
       motorRelease();
@@ -172,7 +176,7 @@ void loop() {
   delay(10);
 }
 
-// ----------------- Pump Operation -----------------
+// ----------------- Hier wird alles mit den Buttons gemacht -----------------
 void handlePumpOperation() {
   currentStopStartState = digitalRead(BTN_START_STOP);
   currentFillState      = digitalRead(BTN_FILL);
@@ -193,13 +197,13 @@ void handlePumpOperation() {
           operationInProgress = false;
         }
         updatePumpDisplay();
-        motorRelease(); // sofort freigeben
+        motorRelease(); // sofort freigeben damit Motor nicht überhitzt
       } else {
         motorRunning = true;
         motorStopped = false;
         operationStartTime = millis();
         operationInProgress = true;
-        motorEnable(); // bereit für Bewegung
+        motorEnable(); // Motor bereit machen
       }
     }
   }
@@ -256,7 +260,7 @@ void performFillOperation() {
   motorEnable();
 
   for (int i = 0; i < stepSize; i++) {
-    // Grenze prüfen
+    // schauen ob schon voll ist
     if (totalSteps - i <= minSteps) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
@@ -272,17 +276,18 @@ void performFillOperation() {
       break;
     }
 
-    // Not-Halt
+    // Stop Button gedrückt?
     if (digitalRead(BTN_START_STOP) == LOW) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
       operationInProgress = false;
       totalSteps -= i;
+      motorRelease();
       delay(150);
       break;
     }
 
-    // Schritt (Füllen = -1)
+    // einen Schritt rückwärts (füllen)
     myStepper.step(-1);
     noteActivity();
 
@@ -315,8 +320,8 @@ void performFillOperation() {
   }
 
   updatePumpDisplay();
-  motorRelease();   // nach der Operation freigeben
-  noteActivity();   // Idle-Timer neu setzen (jetzt frei)
+  motorRelease();   // Motor freigeben nach Operation
+  noteActivity();   // Timer zurücksetzen
   delay(80);
 }
 
@@ -329,7 +334,7 @@ void performEmptyOperation() {
   motorEnable();
 
   for (int i = 0; i < stepSize; i++) {
-    // Grenze prüfen
+    // schauen ob schon leer ist
     if (totalSteps + i >= 0) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
@@ -345,17 +350,18 @@ void performEmptyOperation() {
       break;
     }
 
-    // Not-Halt
+    // Stop Button gedrückt?
     if (digitalRead(BTN_START_STOP) == LOW) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
       operationInProgress = false;
       totalSteps += i;
+      motorRelease();
       delay(150);
       break;
     }
 
-    // Schritt (Leeren = +1)
+    // einen Schritt vorwärts (leeren)
     myStepper.step(1);
     noteActivity();
 
@@ -387,12 +393,12 @@ void performEmptyOperation() {
   }
 
   updatePumpDisplay();
-  motorRelease();   // nach der Operation freigeben
-  noteActivity();   // Idle-Timer neu setzen (jetzt frei)
+  motorRelease();   // Motor freigeben nach Operation
+  noteActivity();   // Timer zurücksetzen
   delay(80);
 }
 
-// ----------------- Anzeige -----------------
+// ----------------- Display Anzeige updaten -----------------
 void updatePumpDisplay() {
   lcd.clear();
   float currentVol = abs((float)totalSteps / stepsPerML);
