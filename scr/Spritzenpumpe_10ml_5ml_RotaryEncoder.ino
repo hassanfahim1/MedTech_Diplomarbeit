@@ -1,8 +1,8 @@
 /*
- * Open Source Spritzenpumpe - V1.2 (Thermik-Optimierung)
- * - motorEnable() / motorRelease() für weniger Wärme im Stillstand
- * - Idle-Timer: Nach 2 s Inaktivität werden die Phasen freigegeben
- * - Optionaler reduzierter Haltestrom per PWM (HALTESTROM_DUTY)
+ * Open Source Spritzenpumpe - V1.2.1 (Stop-Button Fix)
+ * - Verbessertes Debouncing für Stop-Button
+ * - Saubere Interrupt-Behandlung
+ * - Robustere Zustandsübergänge
  *
  * Hardware:
  * Arduino Leonardo + Motor Shield Rev3 (L298P) + I2C LCD + 3 Buttons + Rotary Encoder
@@ -13,7 +13,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <Stepper.h>
 
-// ----------------- Motor Shield Rev3 Pins -----------------
+// ----------------- Hier sind alle Motor Shield Rev3 Pins (Anschlüsse) -----------------
 #define pwmA   3
 #define pwmB  11
 #define brakeA 9
@@ -21,24 +21,24 @@
 #define dirA  12
 #define dirB  13
 
-// ----------------- Button Pins -----------------
-#define BTN_START_STOP 2    // Stop/Start
-#define BTN_FILL       7    // Füllen
-#define BTN_EMPTY      5    // Entleeren
+// ----------------- Die drei Taster wo ich angeschlossen habe -----------------
+#define BTN_START_STOP 2    // Stop/Start Button
+#define BTN_FILL       7    // Füllen Button
+#define BTN_EMPTY      5    // Entleeren Button
 
-// ----------------- Rotary Encoder Pins -----------------
+// ----------------- Rotary Encoder Pins für Menü Auswahl -----------------
 #define ENCODER_KEY 0       // Drück-Button - Pin 0 (RX)
 #define ENCODER_CLK 1       // S1 (CLK) - Pin 1 (TX)
 #define ENCODER_DT  6       // S2 (DT) - Pin 6
 
-// ----------------- Motor Setup -----------------
+// ----------------- Motor Einstellung -----------------
 const int stepsPerRevolution = 200;
 Stepper myStepper = Stepper(stepsPerRevolution, dirA, dirB);
 
-// ----------------- LCD -----------------
+// ----------------- LCD Display -----------------
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ----------------- Umlaute -----------------
+// ----------------- Deutsche Umlaute selbst gemacht weil LCD sie nicht kann -----------------
 byte umlaut_ue[8] = {0x0A,0x00,0x11,0x11,0x11,0x13,0x0D,0x00}; // ü
 byte umlaut_ae[8] = {0x0A,0x00,0x0E,0x01,0x0F,0x11,0x0F,0x00}; // ä
 byte umlaut_oe[8] = {0x0A,0x00,0x0E,0x11,0x11,0x11,0x0E,0x00}; // ö
@@ -53,7 +53,7 @@ byte umlaut_OE[8] = {0x0A,0x00,0x0E,0x11,0x11,0x11,0x0E,0x00}; // Ö
 #define CHAR_AE_GROSS 4
 #define CHAR_OE_GROSS 5
 
-// ----------------- Menü System -----------------
+// ----------------- Menü System für Spritzenauswahl -----------------
 enum MenuState {
   MENU_SELECT,
   PUMP_OPERATION
@@ -63,26 +63,35 @@ MenuState currentMenuState = MENU_SELECT;
 int menuSelection = 0;
 bool menuNeedsUpdate = true;
 
-// ----------------- Zustände -----------------
+// ----------------- verschiedene Zustände vom System -----------------
 bool motorRunning = false;
 bool motorStopped = false;
-bool lastStopStartState = HIGH;
-bool lastFillState = HIGH;
-bool lastEmptyState = HIGH;
 
-bool currentStopStartState = HIGH;
-bool currentFillState = HIGH;
-bool currentEmptyState = HIGH;
+// ----------------- Button-Entprellung für stabile Funktion -----------------
+// Mechanische Buttons "prellen" beim Drücken mehrmals schnell
+// Ohne diese Wartezeit würde ein Druck als mehrere Drücke erkannt werden
+// Das führt zu ungewollten mehrfach-Ausführungen
+struct ButtonState {
+  bool current;
+  bool previous;
+  bool pressed;
+  unsigned long lastChangeTime;
+  unsigned long debounceTime;
+};
 
-int motorSpeed = 120; // rpm
+ButtonState stopStartBtn;
+ButtonState fillBtn;
+ButtonState emptyBtn;
 
-// ----------------- Encoder -----------------
+int motorSpeed = 120; // Geschwindigkeit in rpm, nicht zu schnell sonst verliert Schritte
+
+// ----------------- Encoder für Menü Navigation -----------------
 bool lastEncoderKeyState = HIGH;
 bool lastCLKState = HIGH;
 unsigned long lastEncoderTime = 0;
 const unsigned long encoderDebounce = 300;
 
-// ----------------- Spritzen -----------------
+// ----------------- Spritzeneinstellungen für beide Größen -----------------
 struct SyringeConfig {
   int stepSize;
   float stepsPerML;
@@ -98,38 +107,62 @@ SyringeConfig syringeConfigs[2] = {
 
 SyringeConfig currentConfig;
 
-// ----------------- Debounce -----------------
-unsigned long lastDebounceTime = 0;
-unsigned long debounceDelay = 50;
-
 int totalSteps = 0;
 
-// ----------------- Zeit-Tracking -----------------
+// ----------------- Zeit messen für Operationen -----------------
 unsigned long operationStartTime = 0;
 unsigned long operationDuration  = 0;
 bool operationInProgress = false;
 
-// ----------------- Idle-Handling / Thermik -----------------
+// ----------------- Motor wird heiß Fix -----------------
 static unsigned long lastMoveMs = 0;
-const unsigned long IDLE_RELEASE_MS = 2000; // nach 2s Phasen freigeben
+const unsigned long IDLE_RELEASE_MS = 2000; // nach 2 Sekunden Motor freigeben
 
-// Optional: reduzierter Haltestrom statt komplett freigeben
-// 0..255 Duty; 0 = freigeben (empfohlen), z.B. 60..80 = ~25-30% Duty
-#define HALTESTROM_DUTY 0   // auf >0 setzen, wenn leichtes Haltemoment nötig
+// Optional: bisschen Strom lassen statt ganz freigeben
+// 0..255 Wert; 0 = komplett freigeben, ca 60-80 = bisschen halten
+#define HALTESTROM_DUTY 0   // auf >0 setzen wenn Motor bisschen halten soll
 
-// ----------------- Hilfsfunktionen -----------------
+// ----------------- Hilfs Funktionen -----------------
 void noteActivity() { lastMoveMs = millis(); }
 
-// Motor freigeben: keine Dauerbestromung -> deutlich weniger Wärme
+// Verbesserte Button-Abfrage mit robustem Debouncing
+bool updateButtonState(ButtonState &btn, int pin) {
+  bool currentReading = digitalRead(pin);
+  unsigned long currentTime = millis();
+  
+  // Zustand geändert? -> Timer neu starten
+  if (currentReading != btn.current) {
+    btn.lastChangeTime = currentTime;
+    btn.current = currentReading;
+    return false; // Noch im Debounce-Zeitraum
+  }
+  
+  // Genug Zeit vergangen seit letzter Änderung?
+  if (currentTime - btn.lastChangeTime >= btn.debounceTime) {
+    // Stabiler neuer Zustand -> Flanke erkennen
+    if (btn.previous == HIGH && btn.current == LOW) {
+      btn.pressed = true;
+    } else {
+      btn.pressed = false;
+    }
+    btn.previous = btn.current;
+    return btn.pressed;
+  }
+  
+  return false;
+}
+
+// Motor freigeben damit er nicht überhitzt
+// Wenn Motor steht soll kein Strom fließen, sonst wird er zu heiß
 void motorRelease() {
   if (HALTESTROM_DUTY == 0) {
-    // voll freigeben
+    // komplett freigeben
     digitalWrite(pwmA, LOW);
     digitalWrite(pwmB, LOW);
-    digitalWrite(brakeA, HIGH); // dynamische Bremse
+    digitalWrite(brakeA, HIGH); // Bremse an
     digitalWrite(brakeB, HIGH);
   } else {
-    // reduzierter "Haltestrom" per PWM (Notlösung)
+    // bisschen Strom lassen falls nötig
     digitalWrite(brakeA, LOW);
     digitalWrite(brakeB, LOW);
     analogWrite(pwmA, HALTESTROM_DUTY);
@@ -137,11 +170,11 @@ void motorRelease() {
   }
 }
 
-// Motor aktivieren vor Bewegung
+// Motor anschalten bevor er sich bewegen soll
 void motorEnable() {
   digitalWrite(brakeA, LOW);
   digitalWrite(brakeB, LOW);
-  // Volle Versorgung auf die H-Brücken
+  // volle Power geben
   if (HALTESTROM_DUTY == 0) {
     digitalWrite(pwmA, HIGH);
     digitalWrite(pwmB, HIGH);
@@ -151,24 +184,29 @@ void motorEnable() {
   }
 }
 
-// Hashes anhand Volumen
-int calculateCurrentHashes() {
-  float currentVol = abs((float)totalSteps / currentConfig.stepsPerML);
-  float maxVol = currentConfig.targetVolume;
-  int hashes = (int)((currentVol / maxVol) * 13.0);
-  if (hashes > 13) hashes = 13;
-  if (hashes < 0)  hashes = 0;
-  return hashes;
+// Sicherer Motor-Stop für Notfälle
+void emergencyMotorStop() {
+  motorRunning = false;
+  operationInProgress = false;
+  motorStopped = true;
+  motorRelease();
+  
+  if (operationStartTime > 0) {
+    operationDuration = (millis() - operationStartTime) / 1000;
+  }
+  
+  // kurze Pause für Hardware-Stabilisierung
+  delay(10);
 }
 
-// ----------------- Setup -----------------
+// ----------------- Setup läuft einmal beim Start -----------------
 void setup() {
   pinMode(pwmA, OUTPUT);
   pinMode(pwmB, OUTPUT);
   pinMode(brakeA, OUTPUT);
   pinMode(brakeB, OUTPUT);
 
-  // Startzustand: Motor freigeben
+  // am Anfang Motor freigeben
   motorRelease();
 
   pinMode(BTN_START_STOP, INPUT_PULLUP);
@@ -195,17 +233,36 @@ void setup() {
   lcd.createChar(CHAR_OE_GROSS, umlaut_OE);
 
   lcd.setCursor(0, 0);
-  lcd.print("OSPumpe V1.2");
+  lcd.print("OSPumpe V1.2.1");
   lcd.setCursor(0, 1);
-  lcd.print("Initial...");
+  lcd.print("HFMTS");
   delay(1200);
 
   currentMenuState = MENU_SELECT;
   updateMenuDisplay();
   noteActivity();
+  
+  // Button-Zustände initialisieren
+  stopStartBtn.current = digitalRead(BTN_START_STOP);
+  stopStartBtn.previous = stopStartBtn.current;
+  stopStartBtn.pressed = false;
+  stopStartBtn.lastChangeTime = 0;
+  stopStartBtn.debounceTime = 50;
+  
+  fillBtn.current = digitalRead(BTN_FILL);
+  fillBtn.previous = fillBtn.current;
+  fillBtn.pressed = false;
+  fillBtn.lastChangeTime = 0;
+  fillBtn.debounceTime = 50;
+  
+  emptyBtn.current = digitalRead(BTN_EMPTY);
+  emptyBtn.previous = emptyBtn.current;
+  emptyBtn.pressed = false;
+  emptyBtn.lastChangeTime = 0;
+  emptyBtn.debounceTime = 50;
 }
 
-// ----------------- Loop -----------------
+// ----------------- Main Loop läuft immer und immer -----------------
 void loop() {
   if (currentMenuState == MENU_SELECT) {
     handleMenuInput();
@@ -217,17 +274,17 @@ void loop() {
     handlePumpOperation();
   }
 
-  // Idle-Handling: wenn nicht in Bewegung und nicht in Operation -> freigeben
+  // wenn nichts passiert nach 2 Sekunden Motor freigeben
   if (!motorRunning && !operationInProgress) {
     if (millis() - lastMoveMs > IDLE_RELEASE_MS) {
       motorRelease();
     }
   }
 
-  delay(10);
+  delay(5); // schnellere Reaktionszeit
 }
 
-// ----------------- Menü -----------------
+// ----------------- Menü Navigation mit Encoder -----------------
 void handleMenuInput() {
   bool currentCLKState = digitalRead(ENCODER_CLK);
   if (currentCLKState != lastCLKState && (millis() - lastEncoderTime) > 100) {
@@ -285,7 +342,7 @@ void updateSyringeConfig() {
   totalSteps = 0;
 }
 
-// ----------------- Pump Operation -----------------
+// ----------------- Hier wird alles mit den Buttons gemacht -----------------
 void handlePumpOperation() {
   bool currentEncoderKeyState = digitalRead(ENCODER_KEY);
   if (currentEncoderKeyState == LOW && lastEncoderKeyState == HIGH) {
@@ -310,38 +367,45 @@ void handlePumpOperation() {
   }
   lastEncoderKeyState = currentEncoderKeyState;
 
-  currentStopStartState = digitalRead(BTN_START_STOP);
-  currentFillState      = digitalRead(BTN_FILL);
-  currentEmptyState     = digitalRead(BTN_EMPTY);
+  // Verbesserte Button-Behandlung
+  bool stopPressed = updateButtonState(stopStartBtn, BTN_START_STOP);
+  bool fillPressed = updateButtonState(fillBtn, BTN_FILL);
+  bool emptyPressed = updateButtonState(emptyBtn, BTN_EMPTY);
 
-  if (currentStopStartState != lastStopStartState) {
-    lastDebounceTime = millis();
-  }
-
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (currentStopStartState == LOW && lastStopStartState == HIGH) {
-      if (motorRunning || operationInProgress) {
-        motorRunning = false;
-        motorStopped = true;
-
-        if (operationInProgress) {
-          operationDuration = (millis() - operationStartTime) / 1000;
-          operationInProgress = false;
-        }
-        updatePumpDisplay();
-        motorRelease(); // sofort freigeben
-      } else {
-        motorRunning = true;
-        motorStopped = false;
-        operationStartTime = millis();
-        operationInProgress = true;
-        motorEnable(); // bereit für Bewegung
-      }
+  // Stop/Start Button (höchste Priorität)
+  if (stopPressed) {
+    if (motorRunning || operationInProgress) {
+      // sofortiger Stop
+      emergencyMotorStop();
+      
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("GESTOPPT!");
+      lcd.setCursor(0, 1);
+      lcd.print("Dauer: ");
+      lcd.print(operationDuration);
+      lcd.print("s");
+      delay(1500);
+      
+      updatePumpDisplay();
+    } else {
+      // Start
+      motorRunning = true;
+      motorStopped = false;
+      operationStartTime = millis();
+      operationInProgress = true;
+      motorEnable();
+      noteActivity();
+      
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("GESTARTET!");
+      delay(500);
     }
   }
-  lastStopStartState = currentStopStartState;
 
-  if (currentFillState == LOW && lastFillState == HIGH) {
+  // Fill Button
+  if (fillPressed && !motorRunning && !operationInProgress) {
     if (totalSteps <= currentConfig.minSteps) {
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -354,9 +418,9 @@ void handlePumpOperation() {
       performFillOperation();
     }
   }
-  lastFillState = currentFillState;
 
-  if (currentEmptyState == LOW && lastEmptyState == HIGH) {
+  // Empty Button
+  if (emptyPressed && !motorRunning && !operationInProgress) {
     if (totalSteps >= 0) {
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -369,19 +433,18 @@ void handlePumpOperation() {
       performEmptyOperation();
     }
   }
-  lastEmptyState = currentEmptyState;
 
+  // Motor-Betrieb
   if (motorRunning) {
     motorEnable();
     myStepper.step(1);
     noteActivity();
+    
     static unsigned long lastDisplayUpdate = 0;
     if (millis() - lastDisplayUpdate > 500) {
       updatePumpDisplay();
       lastDisplayUpdate = millis();
     }
-  } else {
-    // wenn nicht laufend, Idle-Timer kümmert sich ums Freigeben
   }
 }
 
@@ -394,7 +457,7 @@ void performFillOperation() {
   motorEnable();
 
   for (int i = 0; i < currentConfig.stepSize; i++) {
-    // Grenze prüfen
+    // schauen ob schon voll ist
     if (totalSteps - i <= currentConfig.minSteps) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
@@ -410,17 +473,21 @@ void performFillOperation() {
       break;
     }
 
-    // Not-Halt
+    // Stop Button gedrückt?
     if (digitalRead(BTN_START_STOP) == LOW) {
-      motorStopped = true;
-      operationDuration = (millis() - operationStartTime) / 1000;
-      operationInProgress = false;
       totalSteps -= i;
-      delay(150);
+      emergencyMotorStop();
+      
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("F");
+      lcd.write(CHAR_UE_KLEIN);
+      lcd.print("llen STOP!");
+      delay(1000);
       break;
     }
 
-    // Schritt (Füllen = -1)
+    // einen Schritt rückwärts (füllen)
     myStepper.step(-1);
     noteActivity();
 
@@ -453,8 +520,8 @@ void performFillOperation() {
   }
 
   updatePumpDisplay();
-  motorRelease();   // nach der Operation freigeben
-  noteActivity();   // Idle-Timer neu setzen (jetzt frei)
+  motorRelease(); // Motor freigeben nach Operation
+  noteActivity(); // Timer zurücksetzen
   delay(80);
 }
 
@@ -467,7 +534,7 @@ void performEmptyOperation() {
   motorEnable();
 
   for (int i = 0; i < currentConfig.stepSize; i++) {
-    // Grenze prüfen
+    // schauen ob schon leer ist
     if (totalSteps + i >= 0) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
@@ -483,17 +550,18 @@ void performEmptyOperation() {
       break;
     }
 
-    // Not-Halt
+    // Stop Button gedrückt?
     if (digitalRead(BTN_START_STOP) == LOW) {
       motorStopped = true;
       operationDuration = (millis() - operationStartTime) / 1000;
       operationInProgress = false;
       totalSteps += i;
+      motorRelease();
       delay(150);
       break;
     }
 
-    // Schritt (Leeren = +1)
+    // einen Schritt vorwärts (leeren)
     myStepper.step(1);
     noteActivity();
 
@@ -525,12 +593,12 @@ void performEmptyOperation() {
   }
 
   updatePumpDisplay();
-  motorRelease();   // nach der Operation freigeben
-  noteActivity();   // Idle-Timer neu setzen (jetzt frei)
+  motorRelease(); // Motor freigeben nach Operation
+  noteActivity(); // Timer zurücksetzen
   delay(80);
 }
 
-// ----------------- Anzeige -----------------
+// ----------------- Display Anzeige updaten -----------------
 void updatePumpDisplay() {
   lcd.clear();
   float currentVol = abs((float)totalSteps / currentConfig.stepsPerML);
